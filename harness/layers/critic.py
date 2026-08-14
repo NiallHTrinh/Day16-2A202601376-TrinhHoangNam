@@ -70,9 +70,13 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+from arena.scorer import MAX_CLAIM_CHARS, MAX_CLAIMS_PER_DOC, MAX_SCORED_CLAIMS
+
 from harness.middleware import Middleware
 
-_JOIN = " và "
+#: Liên từ mock dùng (" và ") cộng các biến thể model thật hay dùng khi
+#: nối hai phía mâu thuẫn. Gate vẫn: cả hai nửa ∈ observed + hai doc khác nhau.
+_JOINS = (" và ", " nhưng ", " trong khi ", "; còn ", " tuy nhiên, ")
 
 
 def _owner_doc_id(text: str, ctx) -> str | None:
@@ -89,29 +93,80 @@ def _owner_doc_id(text: str, ctx) -> str | None:
 
 
 def _try_split_fused(text: str, ctx) -> list[dict] | None:
-    """Split a fused contradiction claim on ' và ' into two grounded halves."""
-    if _JOIN not in text:
-        return None
-    parts = text.split(_JOIN)
-    if len(parts) < 2:
-        return None
-    # Try every cut point; take the first that yields two observed halves
-    # from two different documents.
-    for i in range(1, len(parts)):
-        left = _JOIN.join(parts[:i]).strip()
-        right = _JOIN.join(parts[i:]).strip()
-        if not left or not right:
+    """Split a fused contradiction claim on a known join into two grounded halves."""
+    for join in _JOINS:
+        if join not in text:
             continue
-        if not (ctx.saw(left) and ctx.saw(right)):
+        parts = text.split(join)
+        if len(parts) < 2:
             continue
-        left_id = _owner_doc_id(left, ctx)
-        right_id = _owner_doc_id(right, ctx)
-        if left_id and right_id and left_id != right_id:
-            return [
-                {"text": left, "doc_id": left_id},
-                {"text": right, "doc_id": right_id},
-            ]
+        for i in range(1, len(parts)):
+            left = join.join(parts[:i]).strip()
+            right = join.join(parts[i:]).strip()
+            if not left or not right:
+                continue
+            if not (ctx.saw(left) and ctx.saw(right)):
+                continue
+            left_id = _owner_doc_id(left, ctx)
+            right_id = _owner_doc_id(right, ctx)
+            if left_id and right_id and left_id != right_id:
+                return [
+                    {"text": left, "doc_id": left_id},
+                    {"text": right, "doc_id": right_id},
+                ]
     return None
+
+
+def _claim_priority(claim: dict) -> tuple:
+    """Prefer fact-like claims when capping (digits first, then longer)."""
+    text = claim.get("text") if isinstance(claim.get("text"), str) else ""
+    has_digit = any(ch.isdigit() for ch in text)
+    return (0 if has_digit else 1, -len(text))
+
+
+def _shape_claims(claims: list[dict]) -> list[dict]:
+    """Trim/drop to stay under scorer claim-shape caps (MOCK VS REAL #4).
+
+    Legal edits only: substring trim of claim text, and deleting surplus
+    claims. Constants imported from arena.scorer so they stay in sync.
+    """
+    trimmed: list[dict] = []
+    for claim in claims:
+        text = claim.get("text")
+        if not isinstance(text, str):
+            continue
+        if len(text) > MAX_CLAIM_CHARS:
+            claim = {**claim, "text": text[:MAX_CLAIM_CHARS]}
+        trimmed.append(claim)
+
+    # Prefer digit-bearing / longer claims before FIFO caps, so a chatty
+    # real model that dumps filler first does not crowd out the facts.
+    ordered = sorted(enumerate(trimmed), key=lambda pair: (*_claim_priority(pair[1]), pair[0]))
+
+    seen_per_doc: dict[str, int] = {}
+    deduped: list[tuple[int, dict]] = []
+    for index, claim in ordered:
+        doc_id = claim.get("doc_id")
+        key = doc_id if isinstance(doc_id, str) else ""
+        n = seen_per_doc.get(key, 0)
+        if n >= MAX_CLAIMS_PER_DOC:
+            continue
+        deduped.append((index, claim))
+        seen_per_doc[key] = n + 1
+
+    deduped = deduped[:MAX_SCORED_CLAIMS]
+    deduped.sort(key=lambda pair: pair[0])  # restore original relative order
+    return [claim for _, claim in deduped]
+
+
+def _citations_for(claims: list[dict]) -> list[str]:
+    return sorted(
+        {
+            c.get("doc_id")
+            for c in claims
+            if isinstance(c.get("doc_id"), str)
+        }
+    )
 
 
 class Critic(Middleware):
@@ -153,13 +208,17 @@ class Critic(Middleware):
             )
             return report
 
+        kept = _shape_claims(kept)
+        if not kept:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = (
+                "Không đủ căn cứ trong tài liệu đã đọc để trả lời câu hỏi này."
+            )
+            return report
+
         report["claims"] = kept
         report["abstain"] = abstain
-        report["citations"] = sorted(
-            {
-                c.get("doc_id")
-                for c in kept
-                if isinstance(c.get("doc_id"), str)
-            }
-        )
+        report["citations"] = _citations_for(kept)
         return report
