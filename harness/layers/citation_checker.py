@@ -59,14 +59,24 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+from arena.scorer import _norm
+
 from harness.middleware import Middleware
 
 
 def _line_match(text: str, body: str) -> bool:
-    """True iff `text` is a verbatim substring of one LINE of `body`."""
+    """True iff `text` matches one LINE of `body` under scorer `_norm`.
+
+    Mirrors `arena.scorer._supports`: NFC + casefold + whitespace collapse,
+    scoped to a single line. Used only to decide remap — never rewrites
+    `claim["text"]`.
+    """
     if not text or not body:
         return False
-    return any(text in line for line in body.splitlines())
+    needle = _norm(text)
+    if not needle:
+        return False
+    return any(needle in _norm(line) for line in body.splitlines() if line)
 
 
 class CitationChecker(Middleware):

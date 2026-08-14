@@ -70,8 +70,14 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
-from arena.scorer import MAX_CLAIM_CHARS, MAX_CLAIMS_PER_DOC, MAX_SCORED_CLAIMS
+from arena.scorer import (
+    MAX_CLAIM_CHARS,
+    MAX_CLAIMS_PER_DOC,
+    MAX_SCORED_CLAIMS,
+    _norm,
+)
 
+from harness.layers.citation_checker import _line_match
 from harness.middleware import Middleware
 
 #: Liên từ mock dùng (" và ") cộng các biến thể model thật hay dùng khi
@@ -79,15 +85,35 @@ from harness.middleware import Middleware
 _JOINS = (" và ", " nhưng ", " trong khi ", "; còn ", " tuy nhiên, ")
 
 
+def _saw_norm(ctx, text: str) -> bool:
+    """Evidence gate aligned with scorer `_norm`, still line-scoped.
+
+    Raw `ctx.saw` is stricter than `_supports`: a real model that collapses
+    spaces or casefolds when writing FINAL would lose the claim even though
+    the scorer would accept it. Compare normalised needles to normalised
+    lines of each observation — never rewrite claim text.
+    """
+    needle = _norm(text)
+    if not needle:
+        return False
+    observations = getattr(ctx, "observations", None) or []
+    for obs in observations:
+        if not isinstance(obs, str):
+            continue
+        if any(needle in _norm(line) for line in obs.splitlines() if line):
+            return True
+    return False
+
+
 def _owner_doc_id(text: str, ctx) -> str | None:
-    """First fully-observed doc whose body contains `text` as a line substring."""
+    """First fully-observed doc whose body line-matches `text` under `_norm`."""
     if not text or ctx.corpus is None:
         return None
     observed = ctx.observed_text
     for doc in ctx.corpus.docs:
         if not doc.body or doc.body not in observed:
             continue
-        if any(text in line for line in doc.body.splitlines()):
+        if _line_match(text, doc.body):
             return doc.doc_id
     return None
 
@@ -105,7 +131,7 @@ def _try_split_fused(text: str, ctx) -> list[dict] | None:
             right = join.join(parts[i:]).strip()
             if not left or not right:
                 continue
-            if not (ctx.saw(left) and ctx.saw(right)):
+            if not (_saw_norm(ctx, left) and _saw_norm(ctx, right)):
                 continue
             left_id = _owner_doc_id(left, ctx)
             right_id = _owner_doc_id(right, ctx)
@@ -188,7 +214,7 @@ class Critic(Middleware):
             text = claim.get("text")
             if not isinstance(text, str) or not text:
                 continue
-            if ctx.saw(text):
+            if _saw_norm(ctx, text):
                 kept.append(claim)
                 continue
             halves = _try_split_fused(text, ctx)
