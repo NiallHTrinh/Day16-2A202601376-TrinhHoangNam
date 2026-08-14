@@ -4,7 +4,8 @@
     python3 scripts/run_practice.py                  # mock, 8 brief công khai
     python3 scripts/run_practice.py --brief pub-01-sla-hien-hanh
     python3 scripts/run_practice.py --layers none    # baseline, không lớp nào
-    python3 scripts/run_practice.py --model real     # cần ARENA_* trong env
+    python3 scripts/run_practice.py --model real --prompt-addendum
+        # cần ARENA_* : đặt trong shell hoặc copy .env.example → .env (gpt-4o-mini)
 
 Kết quả in ra màn hình VÀ ghi vào một file điểm JSON (mặc định
 `runs/practice.json`) — file đó là thứ `scripts/leaderboard.py` đọc.
@@ -60,6 +61,37 @@ from pathlib import Path
 LAB_ROOT = Path(__file__).resolve().parent.parent
 if str(LAB_ROOT) not in sys.path:
     sys.path.insert(0, str(LAB_ROOT))
+
+ENV_FILE = LAB_ROOT / ".env"
+
+
+def load_dotenv(path: Path = ENV_FILE) -> list[str]:
+    """Load KEY=VALUE pairs from `.env` into os.environ (no new dependency).
+
+    Existing environment variables win — so a shell export still overrides
+    the file. Only used so `--model real` can read ARENA_* from a local
+    `.env` copied from `.env.example` (gpt-4o-mini template).
+    """
+    loaded: list[str] = []
+    if not path.is_file():
+        return loaded
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key in os.environ and os.environ[key] != "":
+            continue
+        os.environ[key] = value
+        loaded.append(key)
+    return loaded
+
 
 from arena.briefs import (  # noqa: E402
     PUBLIC_BRIEFS_PATH,
@@ -318,6 +350,11 @@ def main(argv=None) -> int:
                         help="thoát khác 0 nếu không có model_call nào chứa FINAL")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.model == "real":
+        loaded = load_dotenv()
+        if loaded and not args.quiet:
+            print(f"(đã nạp {', '.join(loaded)} từ {ENV_FILE.name})")
 
     briefs, set_name = load_brief_set(args.briefs)
     if args.brief:

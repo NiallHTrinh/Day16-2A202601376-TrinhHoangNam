@@ -14,6 +14,9 @@ venv/
 # in it is submitted and nothing in it should ever be committed.
 runs/
 
+# Local real-model credentials (copy from .env.example). Never commit keys.
+.env
+
 # Instructor-only phase material. NEVER present in this bundle, and never
 # committed if it ever lands here: it is how the scored round stays scored.
 phases/private/
